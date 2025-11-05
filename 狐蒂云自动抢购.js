@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         狐蒂云自动抢购
 // @namespace    http://tampermonkey.net/
-// @version      1.0.6
+// @version      1.0.7
 // @description  进入支付页或购物车提交后暂停，支持缩放到侧栏，含抢购时间提示，新增重复提交选项，自动关闭弹窗
 // @match        https://www.szhdy.com/*
 // @grant        none
@@ -28,7 +28,10 @@
     // 是否在购物车提交后重复提交订单（而不是暂停）
     repeatSubmitAfterCart: false,
     // 是否自动关闭弹窗
-    autoClosePopup: true
+    autoClosePopup: true,
+    // HTTP错误自动重试（如 404/502），按检查间隔等待后刷新，最多5次；失败自动暂停
+    enableHttpRetry: false,
+    httpRetryMax: 5
   };
 
   /** ==========================
@@ -163,6 +166,60 @@
     return null;
   };
 
+  // 检测HTTP错误状态（通过页面标题/内容特征）
+  const detectHttpError = () => {
+    try {
+      const title = (document.title || '').trim();
+      if (title === '404' || title.includes('404')) return '404';
+      const maintainText = document.querySelector('.maintain-text-title');
+      if (maintainText && maintainText.textContent.includes('抱歉找不到页面')) return '404';
+      if (title === '502 Bad Gateway' || title.includes('502 Bad Gateway')) return '502';
+      if (title.includes('500') || title.includes('500 Internal Server Error')) return '500';
+      if (title.includes('403') || title.includes('403 Forbidden')) return '403';
+      if (title.includes('503') || title.includes('503 Service Unavailable')) return '503';
+      const hasContent = document.querySelector('.allocation-header-title, .os-card, .configureproduct, .sky-cart-menu-item');
+      if (!hasContent && (title.includes('错误') || title.includes('Error') || (document.body.textContent || '').trim().length < 100)) {
+        return 'EMPTY';
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  // 针对当前页面的重试计数键（优先使用pid）
+  const getRetryKey = () => {
+    try {
+      const params = new URLSearchParams(location.search);
+      const pid = params.get('pid');
+      if (pid) return `hudiyun_buy_http_retry_pid_${pid}`;
+      return `hudiyun_buy_http_retry_${location.pathname}${location.search}`;
+    } catch {
+      return 'hudiyun_buy_http_retry_generic';
+    }
+  };
+
+  const loadRetryCount = () => {
+    try {
+      const v = localStorage.getItem(getRetryKey());
+      return v ? parseInt(v) : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const saveRetryCount = (n) => {
+    try {
+      localStorage.setItem(getRetryKey(), String(n));
+    } catch {}
+  };
+
+  const clearRetryCount = () => {
+    try {
+      localStorage.removeItem(getRetryKey());
+    } catch {}
+  };
+
   /** ==========================
    * 🧠 控制面板（新增抢购时间提示）
    * =========================== */
@@ -261,6 +318,29 @@
         outline: none;
         border-color: #4cd964;
       }
+      .config-checkbox-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        color: #aaa;
+        font-size: 12px;
+        user-select: none;
+        padding: 2px 0;
+        width: auto;
+        margin: 0;
+      }
+      .config-checkbox-label:hover { color: #f0f0f0; }
+      .config-checkbox-label input[type="checkbox"] {
+        margin: 0;
+        cursor: pointer;
+        width: auto;
+        flex-shrink: 0;
+        vertical-align: middle;
+        position: relative;
+        outline: none;
+      }
+      .config-checkbox-label input[type="checkbox"]:focus { outline: none; box-shadow: none; }
       input[type="datetime-local"] {
         color-scheme: dark;
         font-size: 11px;
@@ -387,15 +467,21 @@
             </div>
           </div>
           <div class="config-group">
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <label class="config-checkbox-label">
               <input type="checkbox" id="cfg-repeat-submit" ${config.repeatSubmitAfterCart ? 'checked' : ''}>
               购物车提交后重复提交订单（不暂停）
             </label>
           </div>
           <div class="config-group">
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <label class="config-checkbox-label">
               <input type="checkbox" id="cfg-auto-close-popup" ${config.autoClosePopup ? 'checked' : ''}>
               自动关闭弹窗
+            </label>
+          </div>
+          <div class="config-group">
+            <label class="config-checkbox-label">
+              <input type="checkbox" id="cfg-http-retry" ${config.enableHttpRetry ? 'checked' : ''}>
+              HTTP错误自动重试（404/502等，最多5次）
             </label>
           </div>
         </div>
@@ -470,6 +556,7 @@
       config.refreshAfterFails = parseInt(document.querySelector("#cfg-refresh").value) || 5;
       config.repeatSubmitAfterCart = document.querySelector("#cfg-repeat-submit").checked;
       config.autoClosePopup = document.querySelector("#cfg-auto-close-popup").checked;
+      config.enableHttpRetry = document.querySelector("#cfg-http-retry").checked;
       const sel = document.querySelector('#cfg-detect-mode');
       const checked = sel?.querySelector('input[name="detectMode"]:checked')?.value;
       if (checked === 'all_day' || checked === 'three_periods') config.detectMode = checked;
@@ -494,6 +581,7 @@
       config.refreshAfterFails = parseInt(document.querySelector("#cfg-refresh").value) || 5;
       config.repeatSubmitAfterCart = document.querySelector("#cfg-repeat-submit").checked;
       config.autoClosePopup = document.querySelector("#cfg-auto-close-popup").checked;
+      config.enableHttpRetry = document.querySelector("#cfg-http-retry").checked;
       saveConfig(config);
       
       // 显示短暂保存提示
@@ -538,7 +626,7 @@
     });
 
     // 为复选框添加自动保存
-    document.querySelectorAll('#cfg-repeat-submit, #cfg-auto-close-popup').forEach(el => {
+    document.querySelectorAll('#cfg-repeat-submit, #cfg-auto-close-popup, #cfg-http-retry').forEach(el => {
       el.addEventListener('change', autoSaveConfig);
     });
 
@@ -729,6 +817,35 @@
       return;
     }
 
+    // HTTP错误自动重试：仅在启用时检查
+    if (config.enableHttpRetry && !isCartPage() && !isProtectedPage()) {
+      const httpError = detectHttpError();
+      if (httpError) {
+        const current = loadRetryCount();
+        if (current < (config.httpRetryMax || 5)) {
+          saveRetryCount(current + 1);
+          updatePanel("错误重试中", `检测到HTTP错误(${httpError})，${current + 1}/${config.httpRetryMax} 次，等待后刷新...`);
+          setTimeout(() => location.reload(), config.checkInterval);
+          return;
+        } else {
+          // 超过最大重试次数 → 自动暂停
+          isRunning = false;
+          saveRunning(false);
+          clearRetryCount();
+          const toggle = document.querySelector("#hud-toggle");
+          if (toggle) {
+            toggle.textContent = "开始";
+            toggle.className = "hud-btn toggle status-paused";
+          }
+          updatePanel("已暂停", `HTTP错误(${httpError}) 重试超过${config.httpRetryMax}次，已自动暂停`);
+          return;
+        }
+      } else {
+        // 非错误页 → 清理计数
+        clearRetryCount();
+      }
+    }
+
     await waitUntilTimeRange();
     const url = location.href;
 
@@ -763,6 +880,8 @@
       // 若页面存在商品卡片与按钮，即进入通用检测分支（不再依赖特定 URL）
       const hasProductList = document.querySelector('[data-id] .form-footer-butt');
       if (hasProductList || url.includes("activities/default.html?method=activity")) {
+        // 正常页面路径上，清理错误重试计数
+        clearRetryCount();
         const success = await tryBuyProduct();
         if (success) {
           await sleep(1000);
@@ -783,6 +902,7 @@
           btn.click();
           await sleep(1500);
         } else {
+          clearRetryCount();
           restartIfNeeded();
         }
       }
@@ -816,12 +936,14 @@
             return;
           }
         } else {
+          clearRetryCount();
           restartIfNeeded();
         }
       }
       else {
         failCount = 0;
         updatePanel("空闲", "等待检测");
+        clearRetryCount();
       }
 
       setTimeout(runLoop, config.checkInterval);
