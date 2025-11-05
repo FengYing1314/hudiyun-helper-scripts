@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.0.9
 // @description  进入支付页或购物车提交后暂停，支持缩放到侧栏，含抢购时间提示，新增重复提交选项，自动关闭弹窗
-// @match        https://www.szhdy.com/cart?*
+// @match        https://www.szhdy.com/*
 // @grant        none
 // ==/UserScript==
 
@@ -851,8 +851,8 @@
       return;
     }
 
-    // HTTP错误自动重试：启用后在除支付页外的页面均检查（与识别脚本策略一致）
-    if (config.enableHttpRetry && !isPaymentPage()) {
+    // HTTP错误自动重试：仅在“启用 + 非支付页 + 运行中”时检查，暂停时不触发
+    if (config.enableHttpRetry && !isPaymentPage() && isRunning) {
       const httpError = detectHttpError();
       if (httpError) {
         const current = loadRetryCount();
