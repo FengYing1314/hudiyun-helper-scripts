@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         狐蒂云自动抢购
 // @namespace    http://tampermonkey.net/
-// @version      1.0.7
+// @version      1.0.8
 // @description  进入支付页或购物车提交后暂停，支持缩放到侧栏，含抢购时间提示，新增重复提交选项，自动关闭弹窗
 // @match        https://www.szhdy.com/*
 // @grant        none
@@ -166,9 +166,33 @@
     return null;
   };
 
+  // 参考识别脚本：判断页面是否为有效商品配置页（避免误判为错误页）
+  const isLikelyProductPage = () => {
+    try {
+      const productName = document.querySelector('.allocation-header-title h1');
+      const hasProductName = !!(productName && productName.textContent.trim().length > 0);
+      const hasOsCard = document.querySelector('.os-card') !== null;
+      const hasCycleButtons = document.querySelector('.sky-btn-group.btn-group-toggle');
+      const hasCycleOptions = !!(hasCycleButtons && hasCycleButtons.children.length > 0);
+      const hasConfigOptions = document.querySelectorAll('.sky-config-btn').length > 0;
+      const hasConfigArea = document.querySelector('.configureproduct') !== null;
+      const btnBuyNow = document.querySelector('.btn-buyNow');
+      const hasBuyButton = !!(btnBuyNow && btnBuyNow.textContent.trim().length > 0);
+
+      const hasProductInfo = hasProductName || hasOsCard || (hasConfigArea && (hasCycleOptions || hasConfigOptions));
+      if (hasProductInfo && hasBuyButton) return true;
+      if (hasProductInfo) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   // 检测HTTP错误状态（通过页面标题/内容特征）
   const detectHttpError = () => {
     try {
+      // 若页面明显是有效商品页，直接视为正常，避免误判
+      if (isLikelyProductPage()) return null;
       const title = (document.title || '').trim();
       if (title === '404' || title.includes('404')) return '404';
       const maintainText = document.querySelector('.maintain-text-title');
@@ -177,6 +201,16 @@
       if (title.includes('500') || title.includes('500 Internal Server Error')) return '500';
       if (title.includes('403') || title.includes('403 Forbidden')) return '403';
       if (title.includes('503') || title.includes('503 Service Unavailable')) return '503';
+      // 宽松文本识别（标题不含错误码时）
+      const bodyText = (document.body.innerText || document.body.textContent || '').trim();
+      // 只有在不像商品页时才用文本特征判错，减小误报
+      if (!isLikelyProductPage()) {
+        if (/\b502\b|Bad\s*Gateway/i.test(bodyText)) return '502';
+        if (/\b404\b|Not\s*Found|抱歉找不到页面/i.test(bodyText)) return '404';
+        if (/\b500\b|Internal\s*Server\s*Error/i.test(bodyText)) return '500';
+        if (/\b403\b|Forbidden/i.test(bodyText)) return '403';
+        if (/\b503\b|Service\s*Unavailable/i.test(bodyText)) return '503';
+      }
       const hasContent = document.querySelector('.allocation-header-title, .os-card, .configureproduct, .sky-cart-menu-item');
       if (!hasContent && (title.includes('错误') || title.includes('Error') || (document.body.textContent || '').trim().length < 100)) {
         return 'EMPTY';
@@ -817,8 +851,8 @@
       return;
     }
 
-    // HTTP错误自动重试：仅在启用时检查
-    if (config.enableHttpRetry && !isCartPage() && !isProtectedPage()) {
+    // HTTP错误自动重试：启用后在除支付页外的页面均检查（与识别脚本策略一致）
+    if (config.enableHttpRetry && !isPaymentPage()) {
       const httpError = detectHttpError();
       if (httpError) {
         const current = loadRetryCount();
