@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         狐蒂云自动抢购
 // @namespace    http://tampermonkey.net/
-// @version      1.0.9
+// @version      1.1.2
 // @description  进入支付页或购物车提交后暂停，支持缩放到侧栏，含抢购时间提示，新增重复提交选项，自动关闭弹窗
 // @match        https://www.szhdy.com/*
 // @grant        none
@@ -29,7 +29,7 @@
     repeatSubmitAfterCart: false,
     // 是否自动关闭弹窗
     autoClosePopup: true,
-    // HTTP错误自动重试（如 404/502），按检查间隔等待后刷新，最多5次；失败自动暂停
+    // HTTP错误自动重试（仅 404/502），按检查间隔等待后刷新，最多5次；失败自动暂停
     enableHttpRetry: false,
     httpRetryMax: 5
   };
@@ -193,28 +193,21 @@
     try {
       // 若页面明显是有效商品页，直接视为正常，避免误判
       if (isLikelyProductPage()) return null;
-      const title = (document.title || '').trim();
-      if (title === '404' || title.includes('404')) return '404';
-      const maintainText = document.querySelector('.maintain-text-title');
-      if (maintainText && maintainText.textContent.includes('抱歉找不到页面')) return '404';
-      if (title === '502 Bad Gateway' || title.includes('502 Bad Gateway')) return '502';
-      if (title.includes('500') || title.includes('500 Internal Server Error')) return '500';
-      if (title.includes('403') || title.includes('403 Forbidden')) return '403';
-      if (title.includes('503') || title.includes('503 Service Unavailable')) return '503';
-      // 宽松文本识别（标题不含错误码时）
+      // 仅基于 HTML 文本特征检测 404/502（不检测标题、不检测其他码）
       const bodyText = (document.body.innerText || document.body.textContent || '').trim();
-      // 只有在不像商品页时才用文本特征判错，减小误报
-      if (!isLikelyProductPage()) {
-        if (/\b502\b|Bad\s*Gateway/i.test(bodyText)) return '502';
-        if (/\b404\b|Not\s*Found|抱歉找不到页面/i.test(bodyText)) return '404';
-        if (/\b500\b|Internal\s*Server\s*Error/i.test(bodyText)) return '500';
-        if (/\b403\b|Forbidden/i.test(bodyText)) return '403';
-        if (/\b503\b|Service\s*Unavailable/i.test(bodyText)) return '503';
-      }
-      const hasContent = document.querySelector('.allocation-header-title, .os-card, .configureproduct, .sky-cart-menu-item');
-      if (!hasContent && (title.includes('错误') || title.includes('Error') || (document.body.textContent || '').trim().length < 100)) {
-        return 'EMPTY';
-      }
+      // 判断购物车/配置等关键UI是否存在，用于避免“有UI但含关键字”的误判
+      const hasCartUI = !!(document.querySelector('.submit-btn')
+        || document.querySelector('.payment-checkbox')
+        || document.querySelector('.sky-viewcart-terms-checkbox')
+        || document.querySelector('.nextStep')
+        || document.querySelector('.ordersummarybottom-title')
+        || document.querySelector('.viewcart')
+        || document.querySelector('.sky-cart-menu-item'));
+
+      // 502：页面空空（无关键UI）且包含明确的 502 文本标志
+      if (!hasCartUI && /\b502\b|Bad\s*Gateway/i.test(bodyText)) return '502';
+      // 404：页面空空（无关键UI）且包含明确的 404 文本标志
+      if (!hasCartUI && /\b404\b|Not\s*Found|抱歉找不到页面/i.test(bodyText)) return '404';
       return null;
     } catch {
       return null;
@@ -515,7 +508,7 @@
           <div class="config-group">
             <label class="config-checkbox-label">
               <input type="checkbox" id="cfg-http-retry" ${config.enableHttpRetry ? 'checked' : ''}>
-              HTTP错误自动重试（404/502等，最多5次）
+              HTTP错误自动重试（仅404/502，最多5次）
             </label>
           </div>
         </div>
